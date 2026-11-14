@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Caméra - Surveillance domestique</title>
+<link rel="manifest" href="manifest-camera.webmanifest">
+<link rel="icon" href="icons/favicon.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="style.css">
+<style>
+  .live-banner {
+    display: none;
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #e03e3e;
+    color: white;
+    padding: 6px 16px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: 1px;
+    z-index: 10;
+  }
+  .live-banner.on { display: block; }
+  .live-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: white;
+    border-radius: 50%;
+    margin-right: 6px;
+    animation: pulse 1.4s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .reset-link {
+    font-size: 0.8rem;
+    color: #9a9aa5;
+    text-align: center;
+    margin-top: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>
+</head>
+<body>
+  <div class="live-banner" id="liveBanner"><span class="live-dot"></span>DIFFUSION EN COURS</div>
+  <h1>Caméra de surveillance domestique</h1>
+  <p class="subtitle">Appareil dédié : gardez-le branché au secteur et laissez cette page ouverte en permanence.</p>
+
+  <div class="panel" id="setupPanel">
+    <input id="roomCode" placeholder="Code de salle (ex: MAISON1)" maxlength="20">
+    <input id="password" type="password" placeholder="Mot de passe (recommandé)">
+    <button id="startBtn">Démarrer la diffusion permanente</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <video id="localVideo" autoplay muted playsinline style="display:none;"></video>
+  <p class="reset-link" id="resetLink" style="display:none;">Réinitialiser la configuration de cet appareil</p>
+  <p class="reset-link" id="recordingsLink" style="display:none;"><a href="recordings.html" style="color:#9a9aa5;">Voir les enregistrements locaux</a></p>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/recorder.js"></script>
+  <script>
+    const socket = io({ reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 5000 });
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const localVideo = document.getElementById('localVideo');
+    const liveBanner = document.getElementById('liveBanner');
+    const resetLink = document.getElementById('resetLink');
+    const setupPanel = document.getElementById('setupPanel');
+
+    let localStream = null;
+    let wakeLock = null;
+    let recordingStarted = false;
+    let currentRoomCode = null;
+    let currentPassword = null;
+    const peerConnections = {};
+
+    const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+    const STORAGE_KEY = 'remote-cam:device-config';
+
+    function setStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (type ? ' ' + type : '');
+    }
+
+    async function requestWakeLock() {
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+      } catch (err) {
+        console.warn('Wake Lock indisponible :', err.message);
+      }
+    }
+
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible' && localStream && !wakeLock) {
+        await requestWakeLock();
+      }
+    });
+
+    async function startCamera(roomCode, password) {
+      currentRoomCode = roomCode;
+      currentPassword = password;
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: true,
+        });
+        localVideo.srcObject = localStream;
+      } catch (err) {
+        setStatus("Impossible d'accéder à la caméra : " + err.message, 'err');
+        return;
+      }
+
+      await requestWakeLock();
+
+      if (!recordingStarted) {
+        recordingStarted = true;
+        RecorderModule.init(localVideo, localStream).catch((err) => {
+          console.error("Impossible de démarrer l'enregistrement local :", err);
+        });
+      }
+
+      socket.emit('camera:join', { roomCode, password });
+    }
+
+    startBtn.addEventListener('click', () => {
+      const roomCode = document.getElementById('roomCode').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!roomCode) {
+        setStatus('Veuillez entrer un code de salle.', 'err');
+        return;
+      }
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ roomCode, password }));
+      startCamera(roomCode, password);
+    });
+
+    resetLink.addEventListener('click', () => {
+      if (confirm('Réinitialiser la configuration de cet appareil ?')) {
+        localStorage.removeItem(STORAGE_KEY);
+        location.reload();
+      }
+    });
+
+    socket.on('camera:joined', ({ roomCode }) => {
+      setStatus('Diffusion active sur la salle "' + roomCode + '". En attente de viewers...', 'ok');
+      startBtn.disabled = true;
+      liveBanner.classList.add('on');
+      setupPanel.style.display = 'none';
+      resetLink.style.display = 'block';
+      document.getElementById('recordingsLink').style.display = 'block';
+    });
+
+    socket.on('error:message', (msg) => setStatus(msg, 'err'));
+
+    socket.on('camera:disconnected', () => {
+      setStatus('Connexion interrompue, tentative de reconnexion...', 'err');
+      liveBanner.classList.remove('on');
+    });
+
+    socket.on('connect', () => {
+      if (currentRoomCode && localStream) {
+        socket.emit('camera:join', { roomCode: currentRoomCode, password: currentPassword });
+      }
+    });
+
+    socket.on('viewer:request-offer', async ({ viewerId }) => {
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      peerConnections[viewerId] = pc;
+
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('signal', { to: viewerId, data: { candidate: event.candidate } });
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('signal', { to: viewerId, data: { sdp: offer } });
+    });
+
+    socket.on('viewer:left', ({ viewerId }) => {
+      if (peerConnections[viewerId]) {
+        peerConnections[viewerId].close();
+        delete peerConnections[viewerId];
+      }
+    });
+
+    socket.on('signal', async ({ from, data }) => {
+      const pc = peerConnections[from];
+      if (!pc) return;
+
+      if (data.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      } else if (data.candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) { /* candidat parfois reçu trop tôt, sans impact */ }
+      }
+    });
+
+    window.addEventListener('load', () => {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const { roomCode, password } = JSON.parse(saved);
+        document.getElementById('roomCode').value = roomCode;
+        setStatus('Configuration retrouvée, démarrage automatique...', 'ok');
+        startCamera(roomCode, password);
+      }
+    });
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>

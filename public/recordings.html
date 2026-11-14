@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enregistrements locaux</title>
+<link rel="icon" href="icons/favicon.png">
+<meta name="theme-color" content="#0f1117">
+<link rel="stylesheet" href="style.css">
+<style>
+  .clip-list { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 12px; }
+  .clip { background: #1a1d27; border-radius: 10px; padding: 12px; }
+  .clip-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 0.85rem; }
+  .badge { padding: 3px 8px; border-radius: 999px; font-size: 0.7rem; font-weight: 700; }
+  .badge.event { background: #e03e3e; color: white; }
+  .badge.normal { background: #2e3140; color: #9a9aa5; }
+  .clip video { width: 100%; border-radius: 8px; margin-top: 0; }
+  .clip-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .clip-actions button { flex: 1; padding: 8px; font-size: 0.85rem; }
+  .clip-actions .delete-btn { background: #3a3d4a; }
+  .empty { color: #9a9aa5; text-align: center; margin-top: 40px; }
+</style>
+</head>
+<body>
+  <h1>🗂️ Enregistrements locaux</h1>
+  <p class="subtitle">Buffer glissant : segments récents conservés 1h, séquences avec mouvement conservées 7 jours. Stocké uniquement sur cet appareil.</p>
+
+  <div class="clip-list" id="clipList"></div>
+  <p class="empty" id="emptyMsg" style="display:none;">Aucun enregistrement pour l'instant.</p>
+
+  <script>
+    const clipList = document.getElementById('clipList');
+    const emptyMsg = document.getElementById('emptyMsg');
+
+    function formatDate(ts) { return new Date(ts).toLocaleString('fr-FR'); }
+    function formatSize(bytes) { return (bytes / (1024 * 1024)).toFixed(1) + ' Mo'; }
+
+    async function render() {
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open('remote-cam-recordings', 1);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        req.onupgradeneeded = () => {
+          const database = req.result;
+          if (!database.objectStoreNames.contains('segments')) {
+            database.createObjectStore('segments', { keyPath: 'id', autoIncrement: true });
+          }
+        };
+      });
+
+      const segments = await new Promise((resolve, reject) => {
+        const tx = db.transaction('segments', 'readonly');
+        const req = tx.objectStore('segments').getAll();
+        req.onsuccess = () => resolve(req.result.sort((a, b) => b.timestamp - a.timestamp));
+        req.onerror = () => reject(req.error);
+      });
+
+      clipList.innerHTML = '';
+      emptyMsg.style.display = segments.length === 0 ? 'block' : 'none';
+
+      for (const seg of segments) {
+        const url = URL.createObjectURL(seg.blob);
+        const div = document.createElement('div');
+        div.className = 'clip';
+        div.innerHTML = `
+          <div class="clip-header">
+            <span>${formatDate(seg.timestamp)} — ${formatSize(seg.size)}</span>
+            <span class="badge ${seg.isEvent ? 'event' : 'normal'}">${seg.isEvent ? 'MOUVEMENT' : 'normal'}</span>
+          </div>
+          <video controls src="${url}"></video>
+          <div class="clip-actions">
+            <button class="download-btn">Télécharger</button>
+            <button class="delete-btn">Supprimer</button>
+          </div>
+        `;
+
+        div.querySelector('.download-btn').addEventListener('click', () => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `clip-${seg.timestamp}.webm`;
+          a.click();
+        });
+
+        div.querySelector('.delete-btn').addEventListener('click', async () => {
+          const tx = db.transaction('segments', 'readwrite');
+          tx.objectStore('segments').delete(seg.id);
+          tx.oncomplete = () => render();
+        });
+
+        clipList.appendChild(div);
+      }
+    }
+
+    render();
+  </script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Viewer - Surveillance à distance</title>
+<link rel="manifest" href="manifest-viewer.webmanifest">
+<link rel="icon" href="icons/favicon.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>👁️ Mode Viewer</h1>
+  <p class="subtitle">Regardez le flux vidéo diffusé par l'appareil caméra.</p>
+
+  <div class="panel" id="setupPanel">
+    <input id="roomCode" placeholder="Code de salle (ex: MAISON1)" maxlength="20">
+    <input id="password" type="password" placeholder="Mot de passe (si défini)">
+    <button id="connectBtn">Se connecter</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <video id="remoteVideo" autoplay playsinline controls style="display:none;"></video>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const statusEl = document.getElementById('status');
+    const connectBtn = document.getElementById('connectBtn');
+    const remoteVideo = document.getElementById('remoteVideo');
+
+    const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+    let pc = null;
+
+    function setStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (type ? ' ' + type : '');
+    }
+
+    connectBtn.addEventListener('click', () => {
+      const roomCode = document.getElementById('roomCode').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!roomCode) {
+        setStatus('Veuillez entrer un code de salle.', 'err');
+        return;
+      }
+
+      socket.emit('viewer:join', { roomCode, password });
+    });
+
+    socket.on('viewer:joined', ({ roomCode }) => {
+      setStatus('Connecté à la salle "' + roomCode + '". En attente du flux vidéo...', 'ok');
+      connectBtn.disabled = true;
+    });
+
+    socket.on('error:message', (msg) => setStatus(msg, 'err'));
+
+    socket.on('camera:disconnected', () => {
+      setStatus("La caméra distante s'est déconnectée.", 'err');
+      remoteVideo.style.display = 'none';
+    });
+
+    socket.on('signal', async ({ from, data }) => {
+      if (data.sdp) {
+        pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+        pc.ontrack = (event) => {
+          remoteVideo.srcObject = event.streams[0];
+          remoteVideo.style.display = 'block';
+          setStatus('Flux vidéo en direct.', 'ok');
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.emit('signal', { to: from, data: { candidate: event.candidate } });
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('signal', { to: from, data: { sdp: answer } });
+      } else if (data.candidate && pc) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) { /* candidat parfois reçu trop tôt, sans impact */ }
+      }
+    });
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>
